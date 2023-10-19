@@ -10,7 +10,171 @@ from torch import distributed
 from data_loader import DATASETS_IMG_DIRS
 from data_loader import custom_transforms as tr
 from base.base_dataset import BaseDataset, lbl_contains_any, lbl_contains_all
+# for BTCV
+from monai import data, transforms
+from monai.data import load_decathlon_datalist
+import math
+import torch
 
+class Sampler(torch.utils.data.Sampler):
+    def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True, make_even=True):
+        if num_replicas is None:
+            if not torch.distributed.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = torch.distributed.get_world_size()
+        if rank is None:
+            if not torch.distributed.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = torch.distributed.get_rank()
+        self.shuffle = shuffle
+        self.make_even = make_even
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.num_samples = int(math.ceil(len(self.dataset) * 1.0 / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+        indices = list(range(len(self.dataset)))
+        self.valid_length = len(indices[self.rank : self.total_size : self.num_replicas])
+
+    def __iter__(self):
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices = torch.randperm(len(self.dataset), generator=g).tolist()
+        else:
+            indices = list(range(len(self.dataset)))
+        if self.make_even:
+            if len(indices) < self.total_size:
+                if self.total_size - len(indices) < len(indices):
+                    indices += indices[: (self.total_size - len(indices))]
+                else:
+                    extra_ids = np.random.randint(low=0, high=len(indices), size=self.total_size - len(indices))
+                    indices += [indices[ids] for ids in extra_ids]
+            assert len(indices) == self.total_size
+        indices = indices[self.rank : self.total_size : self.num_replicas]
+        self.num_samples = len(indices)
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+class BTCVSegmentationIncremental(BaseDataset):
+    def __init__(self,
+        test=False, val=False, setting='overlap', classes_idx_new=[], classes_idx_old=[],
+        transform=True, transform_args={}, masking_value=0, data_dir=None,
+    ):
+        if setting not in ['sequential', 'disjoint', 'overlap']:
+            raise ValueError('Wrong setting entered! Please use one of sequential, disjoint, overlap')
+
+        super().__init__(
+            # transform_args=transform_args,
+            # base_dir=pathlib.Path(),
+            # transform=transform,
+        )
+        self.setting = setting
+        self.classes_idx_old = classes_idx_old
+        self.classes_idx_new = classes_idx_new
+
+        self.test = test
+        self.val = val
+        self.train = not (self.test or self.val)
+
+        self.masking_value = masking_value
+        self.datalist_json = os.path.join(data_dir,'dataset_0.json')
+
+        self.train_transform = transforms.Compose(
+            [
+                transforms.LoadImaged(keys=["image", "label"]),
+                transforms.AddChanneld(keys=["image", "label"]),
+                transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
+                transforms.Spacingd(
+                    keys=["image", "label"], pixdim=(1.5, 1.5, 2.0),
+                    mode=("bilinear", "nearest")
+                ),
+                transforms.ScaleIntensityRanged(
+                    keys=["image"], a_min=-175, a_max=250, b_min=0.0, b_max=1.0, clip=True
+                ),
+                transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
+                transforms.RandCropByPosNegLabeld(
+                    keys=["image", "label"],
+                    label_key="label",
+                    spatial_size=(96, 96, 96),
+                    pos=1,
+                    neg=1,
+                    num_samples=4,
+                    image_key="image",
+                    image_threshold=0,
+                ),
+                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=0),
+                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=1),
+                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=2),
+                transforms.RandRotate90d(keys=["image", "label"], prob=0.2, max_k=3),
+                transforms.RandScaleIntensityd(keys="image", factors=0.1, prob=0.1),
+                transforms.RandShiftIntensityd(keys="image", offsets=0.1, prob=0.1),
+                transforms.ToTensord(keys=["image", "label"]),
+            ]
+        )
+        self.val_transform = transforms.Compose(
+            [
+                transforms.LoadImaged(keys=["image", "label"]),
+                transforms.AddChanneld(keys=["image", "label"]),
+                transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
+                transforms.Spacingd(
+                    keys=["image", "label"], pixdim=(1.5, 1.5, 2.0),
+                    mode=("bilinear", "nearest")
+                ),
+                transforms.ScaleIntensityRanged(
+                    keys=["image"], a_min=-175, a_max=250, b_min=0.0, b_max=1.0, clip=True
+                ),
+                transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
+                transforms.ToTensord(keys=["image", "label"]),
+            ]
+        )
+        self.use_normal_dataset = True
+        if self.test:
+            test_files = load_decathlon_datalist(self.datalist_json, True, "validation", base_dir=data_dir)
+            files = test_files
+        else:
+            train_files = load_decathlon_datalist(self.datalist_json, True, "training", base_dir=data_dir)
+            files = train_files
+        self.files = files
+    def __getitem__(self, index):
+        pass
+    def get_dataset(self):
+        if self.test:
+            test_ds = data.Dataset(data=self.files, transform=self.val_transform)
+            dataset = test_ds
+        else:
+            if self.use_normal_dataset:
+                train_ds = data.Dataset(data=self.files, transform=self.train_transform)
+            else:
+                train_ds = data.CacheDataset(
+                    data=self.files, transform=self.train_transform, cache_num=24, cache_rate=1.0, num_workers=8
+                )
+            dataset = train_ds
+        return dataset
+    def _make_img_gt_point_pair(self, index):
+        pass
+    def transform_tr(self, sample):
+        pass
+
+    def transform_val(self, sample):
+        pass
+
+    def transform_test(self, sample):
+        pass
+
+    def transform_target_masking(self, target):
+        pass
+
+    def __str__(self):
+        pass
+
+    def __len__(self):
+        return self.num_samples
 
 class VOCSegmentationIncremental(BaseDataset):
     """
@@ -67,7 +231,7 @@ class VOCSegmentationIncremental(BaseDataset):
 
                 assert _image.is_file(), _image
                 assert _image.is_file(), _cat
-                
+
                 self.images.append(_image)
                 self.categories.append(_cat)
         else:
@@ -78,7 +242,7 @@ class VOCSegmentationIncremental(BaseDataset):
             for ii, line in enumerate(lines):
                 if (ii % 1000 == 0) and (distributed.get_rank() == 0):
                     print(f"[{ii} / {len(lines)}]")
-                    
+
                 if 'aug' not in self.split:
                     _image = self._image_dir / f"{line}.jpg"
                     _cat = self._cat_dir / f"{line}.png"
