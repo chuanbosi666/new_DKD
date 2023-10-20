@@ -64,7 +64,9 @@ class Sampler(torch.utils.data.Sampler):
 class BTCVSegmentationIncremental(BaseDataset):
     def __init__(self,
         test=False, val=False, setting='overlap', classes_idx_new=[], classes_idx_old=[],
-        transform=True, transform_args={}, masking_value=0, data_dir=None,
+        transform=True, transform_args={}, masking_value=0, data_dir=None, space_x= 1.5, space_y =1.5,
+        space_z=2.0, a_min=-175, a_max=250.0, b_min=0.0, b_max=1.0, roi_x=96, roi_y=96, roi_z=96,RandFlipd_prob=0.2,
+        RandRotate90d_prob=0.2, RandScaleIntensityd_prob=0.1, RandShiftIntensityd_prob=0.1,
     ):
         if setting not in ['sequential', 'disjoint', 'overlap']:
             raise ValueError('Wrong setting entered! Please use one of sequential, disjoint, overlap')
@@ -86,37 +88,36 @@ class BTCVSegmentationIncremental(BaseDataset):
         self.datalist_json = os.path.join(data_dir,'dataset_0.json')
 
         self.train_transform = transforms.Compose(
-            [
-                transforms.LoadImaged(keys=["image", "label"]),
-                transforms.AddChanneld(keys=["image", "label"]),
-                transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
-                transforms.Spacingd(
-                    keys=["image", "label"], pixdim=(1.5, 1.5, 2.0),
-                    mode=("bilinear", "nearest")
-                ),
-                transforms.ScaleIntensityRanged(
-                    keys=["image"], a_min=-175, a_max=250, b_min=0.0, b_max=1.0, clip=True
-                ),
-                transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
-                transforms.RandCropByPosNegLabeld(
-                    keys=["image", "label"],
-                    label_key="label",
-                    spatial_size=(96, 96, 96),
-                    pos=1,
-                    neg=1,
-                    num_samples=4,
-                    image_key="image",
-                    image_threshold=0,
-                ),
-                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=0),
-                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=1),
-                transforms.RandFlipd(keys=["image", "label"], prob=0.2, spatial_axis=2),
-                transforms.RandRotate90d(keys=["image", "label"], prob=0.2, max_k=3),
-                transforms.RandScaleIntensityd(keys="image", factors=0.1, prob=0.1),
-                transforms.RandShiftIntensityd(keys="image", offsets=0.1, prob=0.1),
-                transforms.ToTensord(keys=["image", "label"]),
-            ]
-        )
+        [
+            transforms.LoadImaged(keys=["image", "label"]),
+            transforms.AddChanneld(keys=["image", "label"]),
+            transforms.Orientationd(keys=["image", "label"], axcodes="RAS"),
+            transforms.Spacingd(
+                keys=["image", "label"], pixdim=(space_x, space_y, space_z), mode=("bilinear", "nearest")
+            ),
+            transforms.ScaleIntensityRanged(
+                keys=["image"], a_min=a_min, a_max=a_max, b_min=b_min, b_max=b_max, clip=True
+            ),
+            transforms.CropForegroundd(keys=["image", "label"], source_key="image"),
+            transforms.RandCropByPosNegLabeld(
+                keys=["image", "label"],
+                label_key="label",
+                spatial_size=(roi_x, roi_y, roi_z),
+                pos=1,
+                neg=1,
+                num_samples=4,
+                image_key="image",
+                image_threshold=0,
+            ),
+            transforms.RandFlipd(keys=["image", "label"], prob=RandFlipd_prob, spatial_axis=0),
+            transforms.RandFlipd(keys=["image", "label"], prob=RandFlipd_prob, spatial_axis=1),
+            transforms.RandFlipd(keys=["image", "label"], prob=RandFlipd_prob, spatial_axis=2),
+            transforms.RandRotate90d(keys=["image", "label"], prob=RandRotate90d_prob, max_k=3),
+            transforms.RandScaleIntensityd(keys="image", factors=0.1, prob=RandScaleIntensityd_prob),
+            transforms.RandShiftIntensityd(keys="image", offsets=0.1, prob=RandShiftIntensityd_prob),
+            transforms.ToTensord(keys=["image", "label"]),
+        ]
+    )
         self.val_transform = transforms.Compose(
             [
                 transforms.LoadImaged(keys=["image", "label"]),
